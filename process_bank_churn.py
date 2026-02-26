@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
 
-
 TARGET_COL: str = "Exited"
 
+# Рекомендовано прибрати Surname; також часто є ідентифікатори
+DEFAULT_DROP_COLS: List[str] = ["Surname", "CustomerId", "id"]
+
+# Типові фічі (без Surname/CustomerId/id)
 DEFAULT_INPUT_COLS: List[str] = [
     "CreditScore",
     "Geography",
@@ -27,289 +29,345 @@ DEFAULT_INPUT_COLS: List[str] = [
 ]
 
 
-def select_columns(raw_df: pd.DataFrame, input_cols: List[str], target_col: str = TARGET_COL) -> pd.DataFrame:
+def validate_columns_exist(df: pd.DataFrame, cols: List[str]) -> None:
     """
-    Select only columns needed for modeling: input features + target.
+    Validate that all required columns exist in the dataframe.
 
     Args:
-        raw_df: Raw dataframe with all columns.
-        input_cols: List of feature columns to keep.
-        target_col: Target column name.
+        df: Input dataframe.
+        cols: Required column names.
+
+    Raises:
+        ValueError: if any required columns are missing.
+    """
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+
+def drop_unwanted_columns(df: pd.DataFrame, drop_cols: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Drop columns if present.
+
+    Args:
+        df: Input dataframe.
+        drop_cols: Columns to drop.
 
     Returns:
-        DataFrame containing only input_cols + target_col.
+        Dataframe without dropped columns.
     """
-    missing = [c for c in input_cols + [target_col] if c not in raw_df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns in raw_df: {missing}")
-
-    return raw_df[input_cols + [target_col]].copy()
+    drop_cols = drop_cols or []
+    return df.drop(columns=drop_cols, errors="ignore")
 
 
-def split_train_val(
+def split_train_val_test(
     df: pd.DataFrame,
-    target_col: str = TARGET_COL,
+    target_col: str,
+    train_size: float = 0.6,
+    val_size: float = 0.2,
     test_size: float = 0.2,
     random_state: int = 42,
     stratify: bool = True,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Split dataframe into train and validation parts.
+    Split df into train/val/test.
 
     Args:
-        df: DataFrame containing features + target.
-        target_col: Target column name.
-        test_size: Validation size fraction.
+        df: Dataframe containing features + target.
+        target_col: Target column.
+        train_size: Fraction for train.
+        val_size: Fraction for validation.
+        test_size: Fraction for test.
         random_state: Random seed.
-        stratify: Whether to stratify by target_col.
+        stratify: Stratify by target.
 
     Returns:
-        (train_df, val_df)
+        train_df, val_df, test_df
     """
+    total = train_size + val_size + test_size
+    if not np.isclose(total, 1.0):
+        raise ValueError(f"train_size+val_size+test_size must be 1.0, got {total}")
+
     stratify_y = df[target_col] if stratify else None
-    train_df, val_df = train_test_split(
+
+    # split train vs temp
+    train_df, temp_df = train_test_split(
         df,
-        test_size=test_size,
+        test_size=(1.0 - train_size),
         random_state=random_state,
         stratify=stratify_y,
     )
-    return train_df, val_df
+
+    # split temp into val/test
+    stratify_temp = temp_df[target_col] if stratify else None
+    # proportion of test within temp = test_size / (val_size + test_size)
+    test_ratio_in_temp = test_size / (val_size + test_size)
+
+    val_df, test_df = train_test_split(
+        temp_df,
+        test_size=test_ratio_in_temp,
+        random_state=random_state,
+        stratify=stratify_temp,
+    )
+
+    return train_df, val_df, test_df
 
 
-def get_numeric_and_categorical_cols(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
+def get_numeric_and_categorical_cols(X: pd.DataFrame) -> Tuple[List[str], List[str]]:
     """
-    Detect numeric and categorical columns in a dataframe.
+    Detect numeric and categorical columns.
 
     Args:
-        df: Input features dataframe (without target).
+        X: Features dataframe.
 
     Returns:
-        (numeric_cols, categorical_cols)
+        numeric_cols, categorical_cols
     """
-    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-    categorical_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+    numeric_cols = X.select_dtypes(include=np.number).columns.tolist()
+    categorical_cols = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
     return numeric_cols, categorical_cols
 
 
-def fit_scaler(train_inputs: pd.DataFrame, numeric_cols: List[str]) -> MinMaxScaler:
+def fit_scaler(X_train: pd.DataFrame, numeric_cols: List[str]) -> MinMaxScaler:
     """
-    Fit MinMaxScaler on train numeric columns.
+    Fit MinMaxScaler on numeric columns of training data.
 
     Args:
-        train_inputs: Train features dataframe.
-        numeric_cols: Numeric feature column names.
+        X_train: Training features.
+        numeric_cols: Numeric column names.
 
     Returns:
         Fitted MinMaxScaler.
     """
     scaler = MinMaxScaler()
-    scaler.fit(train_inputs[numeric_cols])
+    scaler.fit(X_train[numeric_cols])
     return scaler
 
 
-def apply_scaler(df: pd.DataFrame, scaler: MinMaxScaler, numeric_cols: List[str]) -> pd.DataFrame:
+def apply_scaler(X: pd.DataFrame, scaler: MinMaxScaler, numeric_cols: List[str]) -> pd.DataFrame:
     """
-    Transform numeric columns using a fitted scaler.
+    Transform numeric columns using fitted scaler.
 
     Args:
-        df: Features dataframe.
-        scaler: Fitted MinMaxScaler.
-        numeric_cols: Numeric columns to scale.
+        X: Features dataframe.
+        scaler: Fitted scaler.
+        numeric_cols: Numeric column names to scale.
 
     Returns:
-        DataFrame with scaled numeric columns.
+        Scaled dataframe.
     """
-    out = df.copy()
-    out[numeric_cols] = scaler.transform(out[numeric_cols])
+    out = X.copy()
+    if numeric_cols:
+        out[numeric_cols] = scaler.transform(out[numeric_cols])
     return out
 
 
-def fit_encoder(train_inputs: pd.DataFrame, categorical_cols: List[str]) -> OneHotEncoder:
+def fit_encoder(X_train: pd.DataFrame, categorical_cols: List[str]) -> OneHotEncoder:
     """
-    Fit OneHotEncoder on train categorical columns.
+    Fit OneHotEncoder on categorical columns of training data.
 
     Args:
-        train_inputs: Train features dataframe.
-        categorical_cols: Categorical columns to encode.
+        X_train: Training features.
+        categorical_cols: Categorical column names.
 
     Returns:
         Fitted OneHotEncoder.
     """
     encoder = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
-    encoder.fit(train_inputs[categorical_cols])
+    encoder.fit(X_train[categorical_cols])
     return encoder
 
 
-def apply_encoder(df: pd.DataFrame, encoder: OneHotEncoder, categorical_cols: List[str]) -> Tuple[pd.DataFrame, List[str]]:
+def apply_encoder(
+    X: pd.DataFrame, encoder: OneHotEncoder, categorical_cols: List[str]
+) -> pd.DataFrame:
     """
-    One-hot encode categorical columns using a fitted encoder and drop original categorical columns.
+    Transform categorical columns using fitted encoder and append one-hot columns.
 
     Args:
-        df: Features dataframe.
+        X: Features dataframe.
         encoder: Fitted OneHotEncoder.
-        categorical_cols: Categorical columns to encode.
+        categorical_cols: Columns to encode.
 
     Returns:
-        (encoded_df, encoded_feature_names)
+        Encoded dataframe (categorical cols replaced with one-hot features).
     """
-    out = df.copy()
+    out = X.copy()
     if not categorical_cols:
-        return out, []
+        return out
 
-    encoded_cols = list(encoder.get_feature_names_out(categorical_cols))
     encoded_arr = encoder.transform(out[categorical_cols])
+    encoded_names = list(encoder.get_feature_names_out(categorical_cols))
+    encoded_df = pd.DataFrame(encoded_arr, columns=encoded_names, index=out.index)
 
-    encoded_df = pd.DataFrame(encoded_arr, columns=encoded_cols, index=out.index)
     out = pd.concat([out.drop(columns=categorical_cols), encoded_df], axis=1)
-    return out, encoded_cols
+    return out
 
 
-def reorder_columns(df: pd.DataFrame, final_feature_order: List[str]) -> pd.DataFrame:
+def reorder_columns(X: pd.DataFrame, feature_order: List[str]) -> pd.DataFrame:
     """
-    Reorder columns to a fixed list (important for consistent training/prediction).
+    Ensure columns exactly match feature_order and reorder accordingly.
 
     Args:
-        df: Features dataframe.
-        final_feature_order: Desired column order.
+        X: Features dataframe.
+        feature_order: Desired feature order.
 
     Returns:
-        Reordered dataframe.
+        Reordered dataframe with only feature_order columns.
+
+    Raises:
+        ValueError: if expected columns are missing.
     """
-    missing = [c for c in final_feature_order if c not in df.columns]
+    missing = [c for c in feature_order if c not in X.columns]
     if missing:
-        raise ValueError(f"After preprocessing, some expected columns are missing: {missing}")
-    return df[final_feature_order].copy()
+        raise ValueError(f"Missing expected columns after preprocessing: {missing}")
+    return X[feature_order].copy()
 
 
 def preprocess_data(
     raw_df: pd.DataFrame,
     input_cols: Optional[List[str]] = None,
     target_col: str = TARGET_COL,
+    drop_cols: Optional[List[str]] = None,
     scaler_numeric: bool = True,
+    train_size: float = 0.6,
+    val_size: float = 0.2,
     test_size: float = 0.2,
     random_state: int = 42,
     stratify: bool = True,
-) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, List[str], Optional[MinMaxScaler], OneHotEncoder]:
+) -> Dict[str, Any]:
     """
-    Full preprocessing for training:
-      - select columns
-      - split to train/val
-      - one-hot encode categorical
-      - (optional) scale numeric
-      - return artifacts to reuse later
+    Preprocess raw labeled data with train/val/test split.
+    Fits encoder/scaler ONLY on train, transforms train+val, and returns RAW test to be
+    transformed later via preprocess_new_data().
 
-    Args:
-        raw_df: Raw dataframe (train.csv loaded).
-        input_cols: Feature columns. If None, uses DEFAULT_INPUT_COLS.
-        target_col: Target column name.
-        scaler_numeric: If True, scale numeric columns with MinMaxScaler.
-        test_size: Validation fraction.
-        random_state: Random seed.
-        stratify: Whether to stratify split by target.
-
-    Returns:
-        X_train: processed train features
-        train_targets: train target series
-        X_val: processed val features
-        val_targets: val target series
-        input_cols_final: final feature names used in X (after encoding)
-        scaler: fitted MinMaxScaler or None
-        encoder: fitted OneHotEncoder
+    Returns dict keys:
+      - train_X, train_y
+      - val_X, val_y
+      - test_raw_X, test_y
+      - input_cols (final feature names after encoding)
+      - scaler, encoder
+      - meta (raw_input_cols, numeric_cols, categorical_cols) for convenience
     """
     if input_cols is None:
         input_cols = DEFAULT_INPUT_COLS
+    if drop_cols is None:
+        drop_cols = DEFAULT_DROP_COLS
 
-    df = select_columns(raw_df, input_cols=input_cols, target_col=target_col)
-    train_df, val_df = split_train_val(
-        df, target_col=target_col, test_size=test_size, random_state=random_state, stratify=stratify
+    df = drop_unwanted_columns(raw_df, drop_cols=drop_cols)
+
+    # ensure required columns exist after dropping
+    validate_columns_exist(df, input_cols + [target_col])
+
+    df = df[input_cols + [target_col]].copy()
+
+    train_df, val_df, test_df = split_train_val_test(
+        df,
+        target_col=target_col,
+        train_size=train_size,
+        val_size=val_size,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=stratify,
     )
 
-    train_inputs = train_df[input_cols].copy()
-    val_inputs = val_df[input_cols].copy()
-    train_targets = train_df[target_col].copy()
-    val_targets = val_df[target_col].copy()
+    X_train_raw = train_df[input_cols].copy()
+    y_train = train_df[target_col].copy()
 
-    numeric_cols, categorical_cols = get_numeric_and_categorical_cols(train_inputs)
+    X_val_raw = val_df[input_cols].copy()
+    y_val = val_df[target_col].copy()
 
-    # (Optional) scale numeric
+    X_test_raw = test_df[input_cols].copy()
+    y_test = test_df[target_col].copy()
+
+    numeric_cols, categorical_cols = get_numeric_and_categorical_cols(X_train_raw)
+
+    # Fit on train only
     scaler: Optional[MinMaxScaler] = None
     if scaler_numeric and numeric_cols:
-        scaler = fit_scaler(train_inputs, numeric_cols)
-        train_inputs = apply_scaler(train_inputs, scaler, numeric_cols)
-        val_inputs = apply_scaler(val_inputs, scaler, numeric_cols)
+        scaler = fit_scaler(X_train_raw, numeric_cols)
 
-    # Encode categorical
-    encoder = fit_encoder(train_inputs, categorical_cols) if categorical_cols else OneHotEncoder(
-        sparse_output=False, handle_unknown="ignore"
-    )
+    encoder: Optional[OneHotEncoder] = None
     if categorical_cols:
-        train_inputs, encoded_cols = apply_encoder(train_inputs, encoder, categorical_cols)
-        val_inputs, _ = apply_encoder(val_inputs, encoder, categorical_cols)
-    else:
-        encoded_cols = []
+        encoder = fit_encoder(X_train_raw, categorical_cols)
 
-    # Final feature order (stable)
-    # numeric + all non-categorical leftovers (already there) + encoded
-    input_cols_final = train_inputs.columns.tolist()
+    # Transform train + val (test stays raw here!)
+    X_train = X_train_raw.copy()
+    X_val = X_val_raw.copy()
 
-    X_train = train_inputs.copy()
-    X_val = reorder_columns(val_inputs, input_cols_final)
+    if scaler_numeric and scaler is not None and numeric_cols:
+        X_train = apply_scaler(X_train, scaler, numeric_cols)
+        X_val = apply_scaler(X_val, scaler, numeric_cols)
 
-    return X_train, train_targets, X_val, val_targets, input_cols_final, scaler, encoder
+    if encoder is not None and categorical_cols:
+        X_train = apply_encoder(X_train, encoder, categorical_cols)
+        X_val = apply_encoder(X_val, encoder, categorical_cols)
+
+    # Stable feature order based on train
+    input_cols_final = X_train.columns.tolist()
+    X_val = reorder_columns(X_val, input_cols_final)
+
+    return {
+        "train_X": X_train,
+        "train_y": y_train,
+        "val_X": X_val,
+        "val_y": y_val,
+        "test_raw_X": X_test_raw,
+        "test_y": y_test,
+        "input_cols": input_cols_final,
+        "scaler": scaler,
+        "encoder": encoder,
+        "meta": {
+            "raw_input_cols": input_cols,
+            "numeric_cols": numeric_cols,
+            "categorical_cols": categorical_cols,
+            "drop_cols": drop_cols,
+            "target_col": target_col,
+        },
+    }
 
 
 def preprocess_new_data(
     new_df: pd.DataFrame,
-    input_cols_final: List[str],
+    input_cols: List[str],
     scaler: Optional[MinMaxScaler],
-    encoder: OneHotEncoder,
+    encoder: Optional[OneHotEncoder],
     scaler_numeric: bool = True,
     raw_input_cols: Optional[List[str]] = None,
+    drop_cols: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
-    Preprocess new/unseen data (e.g., test.csv) using already fitted scaler & encoder.
-
-    Important:
-      - You must pass input_cols_final from preprocess_data(...) to keep the same feature set/order.
+    Preprocess new/unseen data (or held-out raw test) using already fitted scaler/encoder.
+    Does NOT fit anything.
 
     Args:
-        new_df: New raw data (without target).
-        input_cols_final: Final feature names from training preprocessing (after encoding).
-        scaler: Fitted MinMaxScaler from training (or None if scaling disabled).
-        encoder: Fitted OneHotEncoder from training.
+        new_df: Raw dataframe WITHOUT target column (or with, but you should pass only features).
+        input_cols: Final feature order from training preprocessing (data["input_cols"]).
+        scaler: Fitted scaler from training (or None).
+        encoder: Fitted encoder from training (or None).
         scaler_numeric: Must match training-time setting.
-        raw_input_cols: Original raw feature columns before encoding.
-                       If None, will try to infer from encoder/scaler where possible,
-                       otherwise falls back to DEFAULT_INPUT_COLS.
+        raw_input_cols: Raw feature columns before encoding/scaling. If None -> DEFAULT_INPUT_COLS.
+        drop_cols: Columns to drop if present (e.g., Surname/CustomerId/id).
 
     Returns:
-        Processed features dataframe with columns exactly == input_cols_final.
+        Processed dataframe with columns exactly == input_cols.
     """
     if raw_input_cols is None:
-        # Best-effort inference:
-        # - encoder.feature_names_in_ gives categorical columns used for fit (sklearn >= 1.0)
-        # - scaler.feature_names_in_ gives numeric columns used for fit (if scaler exists and sklearn >= 1.0)
-        inferred_cats = list(getattr(encoder, "feature_names_in_", []))
-        inferred_nums = list(getattr(scaler, "feature_names_in_", [])) if scaler is not None else []
-        if inferred_cats or inferred_nums:
-            raw_input_cols = inferred_nums + inferred_cats
-        else:
-            raw_input_cols = DEFAULT_INPUT_COLS
+        raw_input_cols = DEFAULT_INPUT_COLS
+    if drop_cols is None:
+        drop_cols = DEFAULT_DROP_COLS
 
-    missing = [c for c in raw_input_cols if c not in new_df.columns]
-    if missing:
-        raise ValueError(f"New data is missing required raw feature columns: {missing}")
+    X = drop_unwanted_columns(new_df, drop_cols=drop_cols)
 
-    inputs = new_df[raw_input_cols].copy()
-    numeric_cols, categorical_cols = get_numeric_and_categorical_cols(inputs)
+    validate_columns_exist(X, raw_input_cols)
+    X = X[raw_input_cols].copy()
+
+    numeric_cols, categorical_cols = get_numeric_and_categorical_cols(X)
 
     if scaler_numeric and scaler is not None and numeric_cols:
-        inputs = apply_scaler(inputs, scaler, numeric_cols)
+        X = apply_scaler(X, scaler, numeric_cols)
 
-    if categorical_cols:
-        inputs, _ = apply_encoder(inputs, encoder, categorical_cols)
+    if encoder is not None and categorical_cols:
+        X = apply_encoder(X, encoder, categorical_cols)
 
-    # Ensure same columns and order as training
-    # If some OHE columns didn't appear in new data, they still exist because encoder outputs them.
-    # If there are extra columns (shouldn't happen), reorder_columns will drop them.
-    return reorder_columns(inputs, input_cols_final)
+    return reorder_columns(X, input_cols)
